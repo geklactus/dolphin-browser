@@ -1,0 +1,171 @@
+diff --git a/src/app.js b/src/app.js
+index 941cf54..094f633 100644
+--- a/src/app.js
++++ b/src/app.js
+@@ -252,6 +252,8 @@ wireTransport();
+ wireKeyboard();
+ wireTouchControls();
+ wireGamepadPolling();
++wireRemoteDisc();
++wireSaveFlush();
+ 
+ // §28cx main-thread profiler — activates only with ?mainprof=1. Diagnoses
+ // what eats main-thread time (LoAF script attribution) and whether the audio
+@@ -372,11 +374,11 @@ function wireTransport() {
+     setStatus("Reset");
+   });
+ 
+-  elements.saveButton.addEventListener("click", () => host.saveState());
+-  elements.loadButton.addEventListener("click", () => {
+-    host.loadState();
+-    syncGameInfo(host.game);
+-  });
++  // dolphin-browser: the core's slot save/load are stubs; the buttons capture a real
++  // state (the same path as the download button) and keep it in IndexedDB under the
++  // game's id, so it is there after a reload. One slot per game.
++  elements.saveButton.addEventListener("click", () => saveStateToBrowser());
++  elements.loadButton.addEventListener("click", () => loadStateFromBrowser());
+ 
+   // Working save-state path (the slot Save/Load above are stubbed in
+   // the discio core): DL State captures a version-matched .sav via
+@@ -853,6 +855,9 @@ async function applyGameProfile(file) {
+   }
+   const profile = lookupGameProfile(gameId);
+   if (!profile) return;
++  // dolphin-browser: the hardware renderer needs WebGPU; without it the software
++  // renderer is the only one that draws, whatever the profile says.
++  if (profile.renderer === "hardware" && !navigator.gpu) return;
+   const backend = profile.renderer === "hardware" ? "WebGPU-Real" : "Software Renderer";
+   if (host.applyVideoBackend(backend)) {
+     setStatus(`${gameId}: ${profile.renderer} renderer (${profile.why})`);
+@@ -1192,6 +1197,130 @@ function formatImageSizes(rawSize, dataSize) {
+   return raw && data ? `${raw} / ${data}` : raw || data || "-";
+ }
+ 
++// ── dolphin-browser: a disc on the server (?disc=<same-origin URL>) ──────────────────
++// The page's own way in is a dropped File. With ?disc= the file stays on the server and
++// is read a piece at a time: the main thread needs only its size (a HEAD) and the first
++// 32 KB (for the game id), the worker reads the rest through Range requests. A click is
++// still needed — the AudioContext wants a gesture — so the drop zone becomes a start
++// button. Settings that reload the page keep the parameter.
++class RemoteDisc {
++  constructor({ url, name, size }) {
++    this.url = url; this.name = name; this.size = size; this.type = "application/octet-stream";
++  }
++  slice(start, end) {
++    const url = this.url, stop = Math.min(end, this.size) - 1;
++    return { arrayBuffer: async () => (await fetch(url, { headers: { Range: `bytes=${start}-${stop}` }, credentials: "same-origin" })).arrayBuffer() };
++  }
++}
++let remoteDiscStats = null;
++function wireRemoteDisc() {
++  const param = new URLSearchParams(window.location.search).get("disc");
++  if (!param) return;
++  let url;
++  try { url = new URL(param, window.location.href); } catch { setStatus("?disc= is not a URL", "error"); return; }
++  if (url.origin !== window.location.origin) { setStatus("?disc= must be on this site", "error"); return; }
++  const name = decodeURIComponent(url.pathname.split("/").pop() || "disc");
++  elements.dropBadge.textContent = `Loading ${name}…`;
++  elements.gameTitle.textContent = name;
++  fetch(url, { method: "HEAD", credentials: "same-origin" })
++    .then((r) => {
++      if (!r.ok) throw new Error(`the disc answered HTTP ${r.status}`);
++      const size = Number(r.headers.get("Content-Length"));
++      if (!size) throw new Error("the server gave no size for the disc");
++      if (r.headers.get("Accept-Ranges") === "none") throw new Error("the server doesn't do Range requests");
++      const disc = new RemoteDisc({ url: url.href, name, size });
++      elements.dropBadge.textContent = `Start ${name}`;
++      elements.dropBadge.classList.add("start");
++      const start = async (event) => {
++        event.preventDefault();
++        elements.dropZone.removeEventListener("click", start);
++        elements.dropBadge.textContent = "Starting…";
++        await mountFile(disc);
++        elements.dropBadge.textContent = "";
++        pollDiscStats();
++      };
++      elements.dropZone.addEventListener("click", start);
++      setStatus(`${name} (${formatBytes(size)}) — click the screen to start`);
++    })
++    .catch((error) => { elements.dropBadge.textContent = "Disc unavailable"; setStatus(error.message, "error"); });
++}
++function pollDiscStats() {
++  setInterval(async () => {
++    const a = host.adapter;
++    if (!a || typeof a.request !== "function") return;
++    try {
++      const r = await a.request("discStats", {});
++      if (!r?.disc) return;
++      remoteDiscStats = r.disc;
++      const d = r.disc;
++      elements.mountNote.textContent = `${(d.bytes / 1048576).toFixed(0)} MB read · waited ${d.waits}× (${(d.waitMs / 1000).toFixed(1)} s)`;
++    } catch { /* the worker is busy or gone */ }
++  }, 2000);
++}
++
++// ── dolphin-browser: memory cards and states that survive a reload ───────────────────
++// The worker keeps Dolphin's memory-card files in IndexedDB on its own clock; a page
++// going away asks it for one last write. States saved to a slot are kept here, under
++// the game's id.
++function wireSaveFlush() {
++  const flush = () => {
++    const a = host.adapter;
++    if (!a || typeof a.request !== "function") return;
++    try { a.request("flushSaves", {}).catch(() => {}); } catch { /* no worker yet */ }
++  };
++  window.addEventListener("pagehide", flush);
++  document.addEventListener("visibilitychange", () => { if (document.hidden) flush(); });
++}
++function statesDb() {
++  return new Promise((resolve, reject) => {
++    const req = indexedDB.open("dolphin-browser", 1);
++    req.onupgradeneeded = () => { const db = req.result; if (!db.objectStoreNames.contains("files")) db.createObjectStore("files"); if (!db.objectStoreNames.contains("states")) db.createObjectStore("states"); };
++    req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
++  });
++}
++function stateKey() {
++  const id = host.game?.gameId || host.game?.name || "disc";
++  return `${id}:1`;
++}
++async function saveStateToBrowser() {
++  const a = host.adapter;
++  if (!a || typeof a.saveStateFile !== "function") { setStatus("No core to save from", "error"); return; }
++  setStatus("Saving state… (a few seconds)");
++  try {
++    const r = await a.saveStateFile();
++    if (!r?.bytes) throw new Error(r?.error || "no state produced");
++    const db = await statesDb();
++    await new Promise((resolve, reject) => {
++      const tx = db.transaction("states", "readwrite");
++      tx.objectStore("states").put({ bytes: r.bytes, when: Date.now(), name: host.game?.name || "" }, stateKey());
++      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
++    });
++    db.close();
++    setStatus(`State saved in this browser (${formatBytes(r.size)})`);
++  } catch (error) {
++    setStatus(`Save state failed: ${error.message}`, "error");
++  }
++}
++async function loadStateFromBrowser() {
++  const a = host.adapter;
++  if (!a || typeof a.loadStateFile !== "function") { setStatus("No core to load into", "error"); return; }
++  try {
++    const db = await statesDb();
++    const row = await new Promise((resolve, reject) => {
++      const req = db.transaction("states", "readonly").objectStore("states").get(stateKey());
++      req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
++    });
++    db.close();
++    if (!row) { setStatus("No state saved for this game in this browser"); return; }
++    setStatus(`Loading state from ${new Date(row.when).toLocaleString()}…`);
++    const r = await a.loadStateFile(new Uint8Array(row.bytes));
++    setStatus(r?.loaded ? "State loaded" : `State load failed (rc=${r?.rc ?? "?"}${r?.error ? " " + r.error : ""})`, r?.loaded ? undefined : "error");
++    syncGameInfo(host.game);
++  } catch (error) {
++    setStatus(`Load state failed: ${error.message}`, "error");
++  }
++}
++
+ async function runSmokeScenario() {
+   const scenario = new URLSearchParams(window.location.search).get("smoke");
+   if (scenario !== "melee") {

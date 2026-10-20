@@ -1,0 +1,217 @@
+diff --git a/src/upstream-discio-worker.js b/src/upstream-discio-worker.js
+index 0cf5de4..0a0d7ac 100644
+--- a/src/upstream-discio-worker.js
++++ b/src/upstream-discio-worker.js
+@@ -1025,6 +1025,18 @@ async function handleMessage(type, payload) {
+       return framePayload();
+     case "bootProbe":
+       return { bootProbe: bootProbePayload(metadataPayload()) };
++    // dolphin-browser: the adapter sends these on Start/Pause; the core runs on its own
++    // thread and the presentation loop has its own controls, so they are acknowledged.
++    case "start":
++    case "pause":
++    case "resume":
++      return framePayload();
++    case "flushSaves": {
++      const written = moduleInstance?.FS ? await persistSaves(moduleInstance.FS) : 0;
++      return { written, disc: remoteDisc?.stats ?? null };
++    }
++    case "discStats":
++      return { disc: remoteDisc?.stats ?? null };
+     case "saveState":
+       return { saved: Boolean(api?.saveState(payload.slot | 0)) };
+     case "loadState": {
+@@ -2171,6 +2183,152 @@ function resolveWorkerFs(moduleInstance) {
+   return moduleInstance?.FS?.filesystems?.WORKERFS ?? moduleInstance?.WORKERFS ?? null;
+ }
+ 
++// ── dolphin-browser: a disc on the server, read a piece at a time ────────────────────
++// WORKERFS reads a mounted file with contents.slice(a, b) and a FileReaderSync. A
++// RangeDisc stands in for the dropped File: its slices are served from fixed-size
++// blocks fetched with HTTP Range requests — synchronously, which a dedicated worker may
++// do — kept in an LRU, with the block after a miss prefetched in the background (the
++// worker's loop runs between the core's reads). The reader is swapped for one that uses
++// a slice's bytes as they are, so no Blob is built per read. The object the main thread
++// posts is the plain {url, name, size} (methods don't survive structured clone); it is
++// recognised by its url.
++const RANGE_BLOCK = 4 * 1024 * 1024;
++const RANGE_CACHE_BLOCKS = 64;                       // 256 MiB of disc kept in memory
++class RangeDisc {
++  constructor({ url, name, size }) {
++    this.url = url; this.name = name; this.size = size; this.type = "application/octet-stream";
++    this.blocks = new Map(); this.prefetching = new Set();
++    this.stats = { requests: 0, bytes: 0, waits: 0, waitMs: 0 };
++  }
++  slice(start = 0, end = this.size) {
++    start = Math.max(0, Math.min(start, this.size)); end = Math.max(start, Math.min(end, this.size));
++    const out = new Uint8Array(end - start);
++    let pos = start, off = 0;
++    while (pos < end) {
++      const i = Math.floor(pos / RANGE_BLOCK), b = this.block(i);
++      const from = pos - i * RANGE_BLOCK, n = Math.min(b.length - from, end - pos);
++      out.set(b.subarray(from, from + n), off); pos += n; off += n;
++    }
++    return { size: out.length, buffer: out.buffer };
++  }
++  block(i) {
++    let b = this.blocks.get(i);
++    if (b) { this.blocks.delete(i); this.blocks.set(i, b); }          // LRU: freshest last
++    else { b = this.fetchSync(i); this.keep(i, b); }
++    const next = i + 1;
++    if (next * RANGE_BLOCK < this.size && !this.blocks.has(next) && !this.prefetching.has(next)) this.prefetch(next);
++    return b;
++  }
++  keep(i, b) {
++    this.blocks.set(i, b);
++    while (this.blocks.size > RANGE_CACHE_BLOCKS) this.blocks.delete(this.blocks.keys().next().value);
++  }
++  range(i) { const a = i * RANGE_BLOCK; return [a, Math.min(a + RANGE_BLOCK, this.size) - 1]; }
++  fetchSync(i) {
++    const [a, b] = this.range(i), t0 = performance.now();
++    const x = new XMLHttpRequest();
++    x.open("GET", this.url, false); x.responseType = "arraybuffer";
++    x.setRequestHeader("Range", `bytes=${a}-${b}`); x.send();
++    if (x.status !== 206) throw new Error(x.status === 200 ? "the server ignored the Range request" : `disc read failed: HTTP ${x.status}`);
++    const bytes = new Uint8Array(x.response);
++    if (bytes.length !== b - a + 1) throw new Error(`short disc read (${bytes.length} of ${b - a + 1})`);
++    this.stats.requests++; this.stats.bytes += bytes.length; this.stats.waits++; this.stats.waitMs += performance.now() - t0;
++    return bytes;
++  }
++  prefetch(i) {
++    const [a, b] = this.range(i);
++    this.prefetching.add(i);
++    fetch(this.url, { headers: { Range: `bytes=${a}-${b}` }, credentials: "same-origin", cache: "no-store" })
++      .then(async (r) => {
++        if (r.status !== 206) return;
++        const bytes = new Uint8Array(await r.arrayBuffer());
++        if (bytes.length === b - a + 1 && !this.blocks.has(i)) { this.keep(i, bytes); this.stats.requests++; this.stats.bytes += bytes.length; }
++      })
++      .catch(() => {})
++      .finally(() => this.prefetching.delete(i));
++  }
++}
++let remoteDisc = null;
++
++// ── dolphin-browser: memory cards that survive a reload ──────────────────────────────
++// Dolphin's user directory is MEMFS; its GCI-folder memory cards are files under
++// /dolphin-user/GC. They are put back from IndexedDB before a disc boots and written
++// out whenever they change (checked every few seconds, and on request). States saved
++// to a slot go the same way, from the main thread.
++const SAVES_DIR = "/dolphin-user/GC";
++const SAVES_DB = "dolphin-browser";
++function savesDb() {
++  return new Promise((resolve, reject) => {
++    const req = indexedDB.open(SAVES_DB, 1);
++    req.onupgradeneeded = () => { const db = req.result; if (!db.objectStoreNames.contains("files")) db.createObjectStore("files"); if (!db.objectStoreNames.contains("states")) db.createObjectStore("states"); };
++    req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
++  });
++}
++function savesTx(db, mode, fn) {                     // fn fills a box from the store; resolved when the transaction completes
++  return new Promise((resolve, reject) => {
++    const tx = db.transaction("files", mode), box = { result: null };
++    fn(tx.objectStore("files"), box);
++    tx.oncomplete = () => resolve(box.result); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
++  });
++}
++const savesSeen = new Map();                           // path → "size:mtime" as last written out
++function walkFs(fs, dir, out = []) {
++  let names = [];
++  try { names = fs.readdir(dir); } catch { return out; }
++  for (const name of names) {
++    if (name === "." || name === "..") continue;
++    const path = `${dir}/${name}`;
++    let st; try { st = fs.stat(path); } catch { continue; }
++    if (fs.isDir(st.mode)) walkFs(fs, path, out); else out.push({ path, size: st.size, mtime: Number(st.mtime) || 0 });
++  }
++  return out;
++}
++async function restoreSaves(fs) {
++  const db = await savesDb();
++  const entries = (await savesTx(db, "readonly", (store, box) => {
++    box.result = [];
++    const cursor = store.openCursor();
++    cursor.onsuccess = () => { const c = cursor.result; if (c) { box.result.push({ path: c.key, bytes: c.value }); c.continue(); } };
++  })) || [];
++  let restored = 0;
++  for (const { path, bytes } of entries) {
++    if (!path.startsWith(SAVES_DIR + "/")) continue;
++    try {
++      fs.mkdirTree(path.slice(0, path.lastIndexOf("/")));
++      fs.writeFile(path, bytes);
++      const st = fs.stat(path);
++      savesSeen.set(path, `${st.size}:${Number(st.mtime) || 0}`);
++      restored++;
++    } catch (error) {
++      console.warn(`[saves] could not restore ${path}:`, error);
++    }
++  }
++  db.close();
++  if (restored) console.log(`[saves] ${restored} memory-card file(s) restored from IndexedDB`);
++  return restored;
++}
++async function persistSaves(fs) {
++  const files = walkFs(fs, SAVES_DIR);
++  const changed = files.filter((f) => savesSeen.get(f.path) !== `${f.size}:${f.mtime}`);
++  const gone = [...savesSeen.keys()].filter((path) => !files.some((f) => f.path === path));
++  if (!changed.length && !gone.length) return 0;
++  const db = await savesDb();
++  await savesTx(db, "readwrite", (store) => {
++    for (const f of changed) store.put(fs.readFile(f.path), f.path);
++    for (const path of gone) store.delete(path);
++  });
++  db.close();
++  for (const f of changed) savesSeen.set(f.path, `${f.size}:${f.mtime}`);
++  for (const path of gone) savesSeen.delete(path);
++  console.log(`[saves] ${changed.length} memory-card file(s) written to IndexedDB${gone.length ? `, ${gone.length} removed` : ""}`);
++  return changed.length + gone.length;
++}
++let savesTimer = null;
++function watchSaves(fs) {
++  if (savesTimer) clearInterval(savesTimer);
++  savesTimer = setInterval(() => { persistSaves(fs).catch((error) => console.warn("[saves]", error)); }, 5000);
++}
++
+ function bindApi(module) {
+   const cwrap = module.cwrap.bind(module);
+   const ccall = module.ccall.bind(module);
+@@ -2462,8 +2620,28 @@ async function mountFile(file) {
+     mounted = false;
+   }
+ 
++  // dolphin-browser: a disc on the server is read through a RangeDisc, and WORKERFS's
++  // reader takes a slice's bytes as they are (a real File still goes through the
++  // FileReaderSync). Memory cards come back from IndexedDB before the boot.
++  const workerFs = resolveWorkerFs(moduleInstance);
++  let data = file;
++  if (file.url) {
++    remoteDisc = new RangeDisc(file);
++    data = remoteDisc;
++    if (!workerFs.reader?.rangeAware) {
++      const real = workerFs.reader ?? new FileReaderSync();
++      workerFs.reader = { rangeAware: true, readAsArrayBuffer: (chunk) => (chunk instanceof Blob ? real.readAsArrayBuffer(chunk) : chunk.buffer) };
++    }
++  }
++  try {
++    await restoreSaves(fs);
++  } catch (error) {
++    console.warn("[saves] restore failed:", error);
++  }
++  watchSaves(fs);
++
+   const _t_workerfs = performance.now();
+-  fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
++  fs.mount(workerFs, { blobs: [{ name: safeName, data }] }, WORKERFS_MOUNT_DIR);
+   mounted = true;
+   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
+ 
+@@ -2487,7 +2665,9 @@ async function mountFile(file) {
+   lastPresentedAt = 0;
+   presentedFrame = 0;
+ 
+-  if (api.bootDisc && file.size >= MIN_FULL_BOOT_BYTES) {
++  // dolphin-browser: the 16 MiB gate kept the demo-sized images from booting; a homebrew
++  // disc (Swiss is 1.7 MB) is a real disc too. DiscIO has already accepted it above.
++  if (api.bootDisc && file.size >= 1024 * 1024) {
+     coreBoot.attempted = true;
+     const _t_boot = performance.now();
+     coreBoot.accepted = Boolean(api.bootDisc(path));

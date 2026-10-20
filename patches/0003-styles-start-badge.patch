@@ -1,0 +1,21 @@
+diff --git a/src/styles.css b/src/styles.css
+index 2ff2526..2aafc36 100644
+--- a/src/styles.css
++++ b/src/styles.css
+@@ -362,6 +362,16 @@ canvas {
+   pointer-events: none;
+ }
+ 
++/* dolphin-browser: with ?disc= the badge is the start button (the whole screen is) */
++.drop-badge.start {
++  color: #141416;
++  background: #e0703f;
++  border-color: #e0703f;
++  font-size: 1rem;
++  padding: 10px 18px;
++}
++.crt-set:has(.drop-badge.start) { cursor: pointer; }
++
+ /* The transport now lives in this row, between the power light and the volume
+    dial, so the keys read as part of the console rather than a toolbar parked
+    under it. The speaker grille is gone -- the keys occupy that span. */
