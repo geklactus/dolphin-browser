@@ -1,5 +1,5 @@
 diff --git a/src/app.js b/src/app.js
-index 941cf54..094f633 100644
+index 941cf54..fcfccc5 100644
 --- a/src/app.js
 +++ b/src/app.js
 @@ -252,6 +252,8 @@ wireTransport();
@@ -28,17 +28,36 @@ index 941cf54..094f633 100644
  
    // Working save-state path (the slot Save/Load above are stubbed in
    // the discio core): DL State captures a version-matched .sav via
-@@ -853,6 +855,9 @@ async function applyGameProfile(file) {
+@@ -842,6 +844,18 @@ function updateScreenHud(info) {
+ // Only applies when the user has not chosen a renderer explicitly, either by
+ // URL flag or in the settings panel. A measured default is a good guess, not a
+ // reason to override someone who has already decided.
++// dolphin-browser: `navigator.gpu` exists in browsers that then hand out no adapter
++// (no GPU, a blocklisted driver, a headless or remote session); the hardware renderer
++// would fail at init. One probe, kept for the page's life.
++let webgpuProbe = null;
++function webgpuUsable() {
++  if (!navigator.gpu) return Promise.resolve(false);
++  if (!webgpuProbe) {
++    webgpuProbe = navigator.gpu.requestAdapter().then((adapter) => !!adapter).catch(() => false);
++  }
++  return webgpuProbe;
++}
++
+ async function applyGameProfile(file) {
+   if (!elements.autoProfile?.checked) return;
+   if (new URLSearchParams(window.location.search).has("video")) return;
+@@ -853,6 +867,9 @@ async function applyGameProfile(file) {
    }
    const profile = lookupGameProfile(gameId);
    if (!profile) return;
-+  // dolphin-browser: the hardware renderer needs WebGPU; without it the software
-+  // renderer is the only one that draws, whatever the profile says.
-+  if (profile.renderer === "hardware" && !navigator.gpu) return;
++  // dolphin-browser: the hardware renderer needs a WebGPU adapter; without one the
++  // software renderer is the only one that draws, whatever the profile says.
++  if (profile.renderer === "hardware" && !(await webgpuUsable())) return;
    const backend = profile.renderer === "hardware" ? "WebGPU-Real" : "Software Renderer";
    if (host.applyVideoBackend(backend)) {
      setStatus(`${gameId}: ${profile.renderer} renderer (${profile.why})`);
-@@ -1192,6 +1197,130 @@ function formatImageSizes(rawSize, dataSize) {
+@@ -1192,6 +1209,130 @@ function formatImageSizes(rawSize, dataSize) {
    return raw && data ? `${raw} / ${data}` : raw || data || "-";
  }
  

@@ -52,9 +52,19 @@ runs without it).
       The panel shows how much was read and how often the core waited on the network.
     - the slot Save/Load buttons, stubs in the core, capture a real state (the same path
       as the download button) and keep it in IndexedDB under the game's id.
-    - the per-game "hardware" renderer profile is only applied where WebGPU exists.
+    - the per-game "hardware" renderer profile is only applied where WebGPU hands out an
+      adapter (one probe per page); `navigator.gpu` alone is no promise of one.
     - the memory cards are flushed when the page is hidden or closed.
   - `0003-styles-start-badge.patch`: the Start badge.
+
+## Checked against real discs
+
+Headless Chrome on a Mac, the disc served by a Range-capable test server with the COOP/COEP
+headers, the page opened with `?disc=`: Luigi's Mansion (157 MB RVZ) boots to its title on
+the software renderer (94 % speed) and on the hardware one, reading 44–52 MB of the disc in
+the first minute with 5–7 short waits; Animal Crossing (20 MB RVZ) runs at full speed but
+renders black on both paths, which is upstream's documented state for that title (its
+`game-profiles.js`, issue #11), not the remote-disc path.
 
 ## Releasing
 
