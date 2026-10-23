@@ -47,9 +47,12 @@ runs without it).
       HTTP Range requests — synchronously, which a dedicated worker may do — kept in a
       256 MiB LRU, the next block prefetched after a miss. The reader is swapped for one
       that uses a slice's bytes as they are. A 1.4 GB image starts in seconds.
-    - **memory cards that survive a reload.** Dolphin's user directory is MEMFS; the
-      GCI-folder memory-card files under `/dolphin-user/GC` are restored from IndexedDB
-      before a disc boots and written out when they change (every 5 s, and on request).
+    - **saves that survive a reload.** Dolphin's user directory is MEMFS; the GCI-folder
+      memory-card files under `/dolphin-user/GC` and the Wii NAND under `/dolphin-user/Wii`
+      (a Wii game's save is `title/<id>/data/…`; `tmp/` stays out) are restored from
+      IndexedDB before a disc boots and written out when they change (every 5 s, and on
+      request). Since 2026.10.23-1 for the NAND; before that a Wii save lived until the
+      tab closed.
     - `start`/`pause`/`resume` messages the adapter sends but the worker never answered
       (every Start showed "Unknown upstream worker message"); `flushSaves`/`discStats`.
     - the 16 MiB boot gate lowered to 1 MiB: a homebrew disc is a disc too.
@@ -74,7 +77,10 @@ the first minute with 5–7 short waits; Animal Crossing (20 MB RVZ) runs at ful
 renders black on both paths, which is upstream's documented state for that title (its
 `game-profiles.js`, issue #11), not the remote-disc path. With the fork's core, Mario Kart
 Wii (real disc) boots to its main menu at 60 fps with the mouse as the Wii Remote pointer —
-the menu highlight follows it — and Melee still boots on the same core.
+the menu highlight follows it — and Melee still boots on the same core. With the
+2026.10.23-1 core (the fork's cold-code compile cap), a first launch of Mario Kart Wii with
+an empty JIT cache holds 100–102 % game speed through the menus over 120 s, where
+2026.10.22-1 swung between 2 % and 160 % (median 55–63 %).
 
 ## Releasing
 

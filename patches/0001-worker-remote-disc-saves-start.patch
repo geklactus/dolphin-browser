@@ -1,8 +1,8 @@
 diff --git a/src/upstream-discio-worker.js b/src/upstream-discio-worker.js
-index 0cf5de4..0a0d7ac 100644
+index 39dc3e5..9461483 100644
 --- a/src/upstream-discio-worker.js
 +++ b/src/upstream-discio-worker.js
-@@ -1025,6 +1025,18 @@ async function handleMessage(type, payload) {
+@@ -1036,6 +1036,18 @@ async function handleMessage(type, payload) {
        return framePayload();
      case "bootProbe":
        return { bootProbe: bootProbePayload(metadataPayload()) };
@@ -21,7 +21,7 @@ index 0cf5de4..0a0d7ac 100644
      case "saveState":
        return { saved: Boolean(api?.saveState(payload.slot | 0)) };
      case "loadState": {
-@@ -2171,6 +2183,152 @@ function resolveWorkerFs(moduleInstance) {
+@@ -2186,6 +2198,156 @@ function resolveWorkerFs(moduleInstance) {
    return moduleInstance?.FS?.filesystems?.WORKERFS ?? moduleInstance?.WORKERFS ?? null;
  }
  
@@ -92,12 +92,15 @@ index 0cf5de4..0a0d7ac 100644
 +}
 +let remoteDisc = null;
 +
-+// ── dolphin-browser: memory cards that survive a reload ──────────────────────────────
++// ── dolphin-browser: memory cards and the Wii NAND survive a reload ───────────────────
 +// Dolphin's user directory is MEMFS; its GCI-folder memory cards are files under
-+// /dolphin-user/GC. They are put back from IndexedDB before a disc boots and written
-+// out whenever they change (checked every few seconds, and on request). States saved
-+// to a slot go the same way, from the main thread.
-+const SAVES_DIR = "/dolphin-user/GC";
++// /dolphin-user/GC and a Wii game's save lives in the NAND under /dolphin-user/Wii
++// (title/<id>/data/…, with the system files beside it — small, and harmless to keep).
++// They are put back from IndexedDB before a disc boots and written out whenever they
++// change (checked every few seconds, and on request). States saved to a slot go the
++// same way, from the main thread. The NAND's tmp/ is scratch and stays out.
++const SAVES_DIRS = ["/dolphin-user/GC", "/dolphin-user/Wii"];
++const SAVES_SKIP = ["/dolphin-user/Wii/tmp"];
 +const SAVES_DB = "dolphin-browser";
 +function savesDb() {
 +  return new Promise((resolve, reject) => {
@@ -121,7 +124,8 @@ index 0cf5de4..0a0d7ac 100644
 +    if (name === "." || name === "..") continue;
 +    const path = `${dir}/${name}`;
 +    let st; try { st = fs.stat(path); } catch { continue; }
-+    if (fs.isDir(st.mode)) walkFs(fs, path, out); else out.push({ path, size: st.size, mtime: Number(st.mtime) || 0 });
++    if (fs.isDir(st.mode)) { if (!SAVES_SKIP.includes(path)) walkFs(fs, path, out); }
++    else out.push({ path, size: st.size, mtime: Number(st.mtime) || 0 });
 +  }
 +  return out;
 +}
@@ -134,7 +138,7 @@ index 0cf5de4..0a0d7ac 100644
 +  })) || [];
 +  let restored = 0;
 +  for (const { path, bytes } of entries) {
-+    if (!path.startsWith(SAVES_DIR + "/")) continue;
++    if (!SAVES_DIRS.some((dir) => path.startsWith(dir + "/"))) continue;
 +    try {
 +      fs.mkdirTree(path.slice(0, path.lastIndexOf("/")));
 +      fs.writeFile(path, bytes);
@@ -146,11 +150,11 @@ index 0cf5de4..0a0d7ac 100644
 +    }
 +  }
 +  db.close();
-+  if (restored) console.log(`[saves] ${restored} memory-card file(s) restored from IndexedDB`);
++  if (restored) console.log(`[saves] ${restored} save file(s) restored from IndexedDB`);
 +  return restored;
 +}
 +async function persistSaves(fs) {
-+  const files = walkFs(fs, SAVES_DIR);
++  const files = SAVES_DIRS.flatMap((dir) => walkFs(fs, dir));
 +  const changed = files.filter((f) => savesSeen.get(f.path) !== `${f.size}:${f.mtime}`);
 +  const gone = [...savesSeen.keys()].filter((path) => !files.some((f) => f.path === path));
 +  if (!changed.length && !gone.length) return 0;
@@ -162,7 +166,7 @@ index 0cf5de4..0a0d7ac 100644
 +  db.close();
 +  for (const f of changed) savesSeen.set(f.path, `${f.size}:${f.mtime}`);
 +  for (const path of gone) savesSeen.delete(path);
-+  console.log(`[saves] ${changed.length} memory-card file(s) written to IndexedDB${gone.length ? `, ${gone.length} removed` : ""}`);
++  console.log(`[saves] ${changed.length} save file(s) written to IndexedDB${gone.length ? `, ${gone.length} removed` : ""}`);
 +  return changed.length + gone.length;
 +}
 +let savesTimer = null;
@@ -174,7 +178,7 @@ index 0cf5de4..0a0d7ac 100644
  function bindApi(module) {
    const cwrap = module.cwrap.bind(module);
    const ccall = module.ccall.bind(module);
-@@ -2462,8 +2620,28 @@ async function mountFile(file) {
+@@ -2500,8 +2662,28 @@ async function mountFile(file) {
      mounted = false;
    }
  
@@ -204,7 +208,7 @@ index 0cf5de4..0a0d7ac 100644
    mounted = true;
    console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
  
-@@ -2487,7 +2665,9 @@ async function mountFile(file) {
+@@ -2525,7 +2707,9 @@ async function mountFile(file) {
    lastPresentedAt = 0;
    presentedFrame = 0;
  
