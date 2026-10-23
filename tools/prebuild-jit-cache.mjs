@@ -10,6 +10,8 @@
 //        --library <disc dir> [--library <another>] --out <dir>
 //        [--duration 150] [--filter <substring>] [--limit N] [--skip-existing]
 //        [--playwright <playwright/index.mjs>] [--port 8089]
+//   --playwright defaults to <wasm-dolphin>/.omx/browser-probe/node_modules/playwright/index.mjs
+//   (npm install --prefix <wasm-dolphin>/.omx/browser-probe playwright) when that exists.
 //
 // Writes <out>/<GAMEID>.bin and <out>/index.json (title, file, modules, bytes, duration).
 // The package's core decides the fingerprint; rebuild the caches after an engine bump.
@@ -30,6 +32,11 @@ for (const need of ["pkg", "wasm-dolphin", "out"]) if (!args[need]) { console.er
 if (!libraries.length) { console.error("--library <dir> is required"); process.exit(2); }
 const pkg = path.resolve(args.pkg), wasmDolphin = path.resolve(args["wasm-dolphin"]), out = path.resolve(args.out);
 const duration = Number(args.duration || 150), port = Number(args.port || 8089), limit = Number(args.limit || 0);
+// Playwright: the one the wasm-dolphin checkout keeps for its own browser tools
+// (.omx/browser-probe/node_modules — where its exporter looks first), unless told otherwise.
+const playwright = args.playwright
+  ? path.resolve(args.playwright)
+  : [path.join(wasmDolphin, ".omx", "browser-probe", "node_modules", "playwright", "index.mjs")].find((p) => existsSync(p)) ?? null;
 const EXTS = new Set([".rvz", ".iso", ".gcm", ".wbfs", ".ciso"]);
 await mkdir(out, { recursive: true });
 const indexPath = path.join(out, "index.json");
@@ -73,7 +80,7 @@ for (const library of libraries) {
       await rm(profile, { recursive: true, force: true });
       console.log(`${id}: ${file} — ${duration} s …`);
       const probe = await run(process.execPath, [path.join(here, "probe.mjs"), "--base-url", `http://127.0.0.1:${port}/`, "--disc", file,
-        "--out", probeOut, "--duration", String(duration), "--profile", profile, ...(args.playwright ? ["--playwright", args.playwright] : [])]);
+        "--out", probeOut, "--duration", String(duration), "--profile", profile, ...(playwright ? ["--playwright", playwright] : [])]);
       const summary = /SUMMARY (\{.*\})/.exec(probe.out)?.[1];
       const exp = await run(process.execPath, [path.join(wasmDolphin, "tools", "export-prebuilt-jit-cache.mjs")], {
         cwd: wasmDolphin,
