@@ -1,8 +1,8 @@
 name: Build
 
-# Packages wasm-dolphin's browser page (dougchansan/wasm-dolphin: the Dolphin GameCube/Wii
-# emulator compiled to WebAssembly) from the upstream commit pinned in `wasm-dolphin-commit`
-# with the patches in patches/ applied. Nothing is compiled: upstream commits its prebuilt
+# Packages wasm-dolphin's browser page (the Dolphin GameCube/Wii emulator compiled to
+# WebAssembly) from the repository pinned in `wasm-dolphin-repo` at the commit pinned in
+# `wasm-dolphin-commit`, with the patches in patches/ applied. Nothing is compiled: upstream commits its prebuilt
 # core (dolphin-core-upstream.{js,wasm}, SHA-256 pinned in its own page), and the patches
 # touch only the page's JavaScript. Every run uploads the result as a workflow artifact; a
 # tag push (v*) or a manual run with a version also publishes it as a GitHub release, which
@@ -38,17 +38,18 @@ jobs:
       - name: Read the pin
         id: pins
         run: |
+          echo "repo=$(tr -d '[:space:]' < wasm-dolphin-repo)" >> "$GITHUB_OUTPUT"
           echo "commit=$(tr -d '[:space:]' < wasm-dolphin-commit)" >> "$GITHUB_OUTPUT"
           ver="${{ github.event.inputs.version }}"
           if [ -z "$ver" ] && [ "${GITHUB_REF_TYPE}" = tag ]; then ver="${GITHUB_REF_NAME#v}"; fi
           [ -n "$ver" ] || ver="0.0.0-$(tr -d '[:space:]' < wasm-dolphin-commit | cut -c1-7)"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
-          echo "wasm-dolphin $(cat wasm-dolphin-commit) · version $ver"
+          echo "wasm-dolphin $(cat wasm-dolphin-repo) @ $(cat wasm-dolphin-commit) · version $ver"
 
       - name: Checkout wasm-dolphin at the pinned commit
         uses: actions/checkout@v7
         with:
-          repository: dougchansan/wasm-dolphin
+          repository: ${{ steps.pins.outputs.repo }}
           ref: ${{ steps.pins.outputs.commit }}
           fetch-depth: 1
           path: upstream
@@ -90,8 +91,9 @@ jobs:
           cp upstream/LICENSE "dist/$name/LICENSE-wasm-dolphin.txt"
           {
             echo "dolphin-browser $ver"
+            echo "wasm-dolphin-repo: ${{ steps.pins.outputs.repo }}"
             echo "wasm-dolphin-commit: ${{ steps.pins.outputs.commit }}"
-            echo "wasm-dolphin-source: https://github.com/dougchansan/wasm-dolphin/tree/${{ steps.pins.outputs.commit }}"
+            echo "wasm-dolphin-source: https://github.com/${{ steps.pins.outputs.repo }}/tree/${{ steps.pins.outputs.commit }}"
             echo "dolphin-commit: $(python3 -c 'import json;u=json.load(open("upstream/provenance/dolphin-source.lock.json"))["upstream"];print(u.get("commit") or u.get("sha") or u)')"
             echo "core-sha256: $(sha256sum upstream/cores/dolphin/dolphin-core-upstream.wasm | cut -c1-64)"
             echo "patches:"; ls patches/*.patch 2>/dev/null | sed 's/^/  /'
