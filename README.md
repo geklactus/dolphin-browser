@@ -63,8 +63,10 @@ runs without it).
       The panel shows how much was read and how often the core waited on the network.
     - the slot Save/Load buttons, stubs in the core, capture a real state (the same path
       as the download button) and keep it in IndexedDB under the game's id.
-    - the per-game "hardware" renderer profile is only applied where WebGPU hands out an
-      adapter (one probe per page); `navigator.gpu` alone is no promise of one.
+    - a per-game profile's switch to the "hardware" renderer is only applied where WebGPU
+      hands out an adapter (one probe per page); `navigator.gpu` alone is no promise of
+      one. Since 2026.10.23-2 a profile also carries upstream's GameSettings lines and the
+      renderer feature bits the title needs, and those apply on either renderer.
     - the memory cards are flushed when the page is hidden or closed.
   - `0003-styles-start-badge.patch`: the Start badge.
 
