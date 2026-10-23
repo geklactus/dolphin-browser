@@ -1,8 +1,8 @@
 diff --git a/src/upstream-discio-worker.js b/src/upstream-discio-worker.js
-index 39dc3e5..9461483 100644
+index 35e0692..48fef8a 100644
 --- a/src/upstream-discio-worker.js
 +++ b/src/upstream-discio-worker.js
-@@ -1036,6 +1036,18 @@ async function handleMessage(type, payload) {
+@@ -1045,6 +1045,18 @@ async function handleMessage(type, payload) {
        return framePayload();
      case "bootProbe":
        return { bootProbe: bootProbePayload(metadataPayload()) };
@@ -21,7 +21,7 @@ index 39dc3e5..9461483 100644
      case "saveState":
        return { saved: Boolean(api?.saveState(payload.slot | 0)) };
      case "loadState": {
-@@ -2186,6 +2198,156 @@ function resolveWorkerFs(moduleInstance) {
+@@ -2205,6 +2217,156 @@ function resolveWorkerFs(moduleInstance) {
    return moduleInstance?.FS?.filesystems?.WORKERFS ?? moduleInstance?.WORKERFS ?? null;
  }
  
@@ -178,7 +178,7 @@ index 39dc3e5..9461483 100644
  function bindApi(module) {
    const cwrap = module.cwrap.bind(module);
    const ccall = module.ccall.bind(module);
-@@ -2500,8 +2662,28 @@ async function mountFile(file) {
+@@ -2519,8 +2681,28 @@ async function mountFile(file, gameProfile = activeGameProfile) {
      mounted = false;
    }
  
@@ -208,7 +208,7 @@ index 39dc3e5..9461483 100644
    mounted = true;
    console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
  
-@@ -2525,7 +2707,9 @@ async function mountFile(file) {
+@@ -2544,7 +2726,9 @@ async function mountFile(file, gameProfile = activeGameProfile) {
    lastPresentedAt = 0;
    presentedFrame = 0;
  
@@ -217,5 +217,5 @@ index 39dc3e5..9461483 100644
 +  // disc (Swiss is 1.7 MB) is a real disc too. DiscIO has already accepted it above.
 +  if (api.bootDisc && file.size >= 1024 * 1024) {
      coreBoot.attempted = true;
-     const _t_boot = performance.now();
-     coreBoot.accepted = Boolean(api.bootDisc(path));
+     // Upstream's per-game settings for this title, applied by Dolphin's own
+     // loader at boot (BootManager -> ConfigLoaders::GenerateGlobalGameConfigLoader
