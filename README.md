@@ -84,6 +84,10 @@ the menu highlight follows it — and Melee still boots on the same core. With t
 an empty JIT cache holds 100–102 % game speed through the menus over 120 s, where
 2026.10.22-1 swung between 2 % and 160 % (median 55–63 %).
 
+Pin only cores built by wasm-dolphin's CI. A core built anywhere else embeds that machine's
+absolute source paths, so its digest can't be reproduced; the code is the same. Two CI runs
+of the same tree gave byte-identical cores (`b7c5c6fe…`, the 2026.10.23-3 core).
+
 ## Releasing
 
 A tag `v<version>` (or **Run workflow** with a version) builds and publishes the release;
