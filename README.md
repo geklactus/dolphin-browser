@@ -44,7 +44,12 @@ runs without it).
   in the fork: memory, then a copy of the whole image in this device's origin-private file
   system, then HTTP Range through a fetch worker that pulls the rest while the game runs —
   after the first minutes nothing waits on the network and a second launch reads none of
-  it), so the patches are down to what the fork doesn't carry:
+  it). Since 2026.10.24-2 a disc can have a read order beside it, `<disc file>.reads.json`
+  (recorded with `?recordreads=1`, or `node tools/probe.mjs --record`): the blocks a title
+  reads first go to the front of that background download, which on a first launch cut the
+  waits of Mario Kart Wii's first 90 s from 5.3 s to 1.2 s at 100 Mbit / 40 ms. Without one
+  (a 404) nothing changes, and with `?opfs=0` there is no background download to reorder.
+  The patches are down to what the fork doesn't carry:
   - `0001-worker-saves-start.patch` (the disc worker):
     - **saves that survive a reload.** Dolphin's user directory is MEMFS; the GCI-folder
       memory-card files under `/dolphin-user/GC` and the Wii NAND under `/dolphin-user/Wii`
