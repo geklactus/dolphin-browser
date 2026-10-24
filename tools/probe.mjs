@@ -32,6 +32,7 @@ for (const kv of (args.extra || "").split("&").filter(Boolean)) { const [k, v] =
 
 const lines = [], samples = [], t0 = Date.now();
 const log = (s) => { const l = `[probe +${((Date.now() - t0) / 1000).toFixed(1)}s] ${s}`; console.log(l); lines.push(l); };
+const mb = (b) => (b == null ? "?" : (b / 1048576).toFixed(0));
 const launch = { channel: process.env.BROWSER_CHANNEL || "chrome", headless: !args.headed };
 const context = args.profile
   ? await chromium.launchPersistentContext(path.resolve(args.profile), { ...launch, viewport: { width: 1280, height: 900 } })
@@ -67,13 +68,19 @@ try {
     const x = await page.evaluate(() => {
       const info = window.__lastFrameInfo || {};
       const rd = (sel) => document.querySelector(sel)?.textContent?.trim() ?? "";
+      const d = window.__discStats || {};
       return { frame: info.frame, gameSpeed: info.gameSpeed, coreFps: info.coreFps, presentFps: info.presentationFps ?? info.fps,
                visualFps: info.visualChangeFps, jitCompiled: info.ppcWasmBlockCompileCount ?? null, mountNote: rd("#mountNote"), status: rd("#statusPill"),
+               // the tiered reader's counters (remote-disc.js): bytes from the server, waits on it and for how long,
+               // bytes kept on the device, whether the whole image is there, hits served from the device
+               disc: { bytes: d.bytes ?? null, waits: d.waits ?? null, waitMs: d.waitMs ?? null, storedBytes: d.storedBytes ?? null,
+                       complete: d.complete ?? null, l2Hits: d.l2Hits ?? null, mode: d.mode ?? null },
                helper: typeof info.ppcWasmHelperStats === "string" ? info.ppcWasmHelperStats.slice(0, 8000) : null };
     });
     x.t = (Date.now() - tStart) / 1000;
     samples.push(x);
-    if (s % 10 === 0) log(`t=${s} frame=${x.frame} speed=${x.gameSpeed}% core=${x.coreFps} visual=${x.visualFps} jit=${x.jitCompiled} | ${x.mountNote}`);
+    if (s % 10 === 0) log(`t=${s} frame=${x.frame} speed=${x.gameSpeed}% core=${x.coreFps} visual=${x.visualFps} jit=${x.jitCompiled}`
+      + ` | disc ${mb(x.disc.bytes)} MB read, waited ${x.disc.waits ?? "?"}× (${((x.disc.waitMs ?? 0) / 1000).toFixed(1)} s), on device ${mb(x.disc.storedBytes)} MB${x.disc.complete ? " (all)" : ""}`);
     if (s % 20 === 0) await shot(`t${String(s).padStart(3, "0")}`);
     // From 20 s on: A on the Wii Remote (a click on the game) and A / Start on the GameCube pad
     // (X / Enter), every 4 s, with the pointer wandering a little — strap screen, title, licence,
@@ -93,7 +100,7 @@ try {
   const sorted = [...spd].sort((a, b) => a - b), q = (f) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(f * sorted.length))] : 0;
   const summary = { disc, extra: args.extra || "", samples: spd.length, frames: Number(samples.at(-1)?.frame) || 0,
     speed: { p10: q(0.1), median: q(0.5), p90: q(0.9), min: sorted[0] ?? 0, max: sorted.at(-1) ?? 0, under80: spd.filter((v) => v < 80).length },
-    jitCompiled: samples.at(-1)?.jitCompiled ?? null, mountNote: samples.at(-1)?.mountNote ?? "" };
+    jitCompiled: samples.at(-1)?.jitCompiled ?? null, mountNote: samples.at(-1)?.mountNote ?? "", disc: samples.at(-1)?.disc ?? null };
   log(`SUMMARY ${JSON.stringify(summary)}`);
   await writeFile(path.join(outDir, "samples.json"), JSON.stringify(samples, null, 1));
   await writeFile(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 2));
