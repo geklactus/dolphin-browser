@@ -82,7 +82,9 @@ try {
                // bytes kept on the device, whether the whole image is there, hits served from the device
                disc: { bytes: d.bytes ?? null, waits: d.waits ?? null, waitMs: d.waitMs ?? null, storedBytes: d.storedBytes ?? null,
                        complete: d.complete ?? null, l2Hits: d.l2Hits ?? null, mode: d.mode ?? null,
-                       readOrder: d.readOrder ?? null, recorded: d.recorded ?? null, sequential: d.sequential ?? null },
+                       readOrder: d.readOrder ?? null, recorded: d.recorded ?? null, sequential: d.sequential ?? null,
+                       // since wasm-dolphin 6829d3c: per miss, time to the window it needed and to the whole block; the link estimate
+                       demand: d.demand ?? null, link: d.link ?? null },
                helper: typeof info.ppcWasmHelperStats === "string" ? info.ppcWasmHelperStats.slice(0, 8000) : null };
     });
     x.t = (Date.now() - tStart) / 1000;

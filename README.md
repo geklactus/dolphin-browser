@@ -49,6 +49,25 @@ runs without it).
   reads first go to the front of that background download, which on a first launch cut the
   waits of Mario Kart Wii's first 90 s from 5.3 s to 1.2 s at 100 Mbit / 40 ms. Without one
   (a 404) nothing changes, and with `?opfs=0` there is no background download to reorder.
+  Since 2026.10.24-3 a read that misses waits only for the bytes it needs, not the whole
+  4 MiB block (the fork's #12). The request starts at the window the read needs, and the
+  read returns once that window has arrived; the rest of the block keeps streaming. Total
+  time Mario Kart Wii's core waited on the network in a first launch's first 100 s, on the
+  Mac (`tools/serve.mjs`, the read order beside the disc, two runs each):
+
+  | link | page settings | 2026.10.24-2 | 2026.10.24-3 |
+  |---|---|---|---|
+  | 20 Mbit/s, 90 ms | defaults | 10.6 s | 3.5–3.9 s |
+  | 20 Mbit/s, 90 ms | `opfs=0&prefetch=0` | 28.3–30.2 s | 9.5–9.9 s |
+  | 100 Mbit/s, 40 ms | defaults | 1.2 s | 0.5 s |
+  | 100 Mbit/s, 40 ms | `opfs=0&prefetch=0` | 7.5 s | 2.1–2.2 s |
+
+  At 20 Mbit/s a miss gets its window in ~0.15 s instead of a whole block's ~1.8 s. Most
+  of the rest is the game reading through a block faster than the link delivers it. The
+  wait count goes up: a read into a block that is still arriving waits per 128 KiB, so
+  compare time, not count. `tools/probe.mjs` also samples `__discStats.demand` (per miss:
+  time to the window and to the whole block) and `.link` (the reader's estimate of
+  throughput and round trip).
   The patches are down to what the fork doesn't carry:
   - `0001-worker-saves-start.patch` (the disc worker):
     - **saves that survive a reload.** Dolphin's user directory is MEMFS; the GCI-folder
