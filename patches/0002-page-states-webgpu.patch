@@ -1,17 +1,16 @@
 diff --git a/src/app.js b/src/app.js
-index e241b29..9f181b5 100644
+index e6a050d..d149b3f 100644
 --- a/src/app.js
 +++ b/src/app.js
-@@ -265,6 +265,8 @@ wireKeyboard();
- wireWiimotePointer();
+@@ -325,6 +325,7 @@ wireWiimotePointer();
  wireTouchControls();
  wireGamepadPolling();
-+wireRemoteDisc();
+ wireRemoteDisc();
 +wireSaveFlush();
  
  // §28cx main-thread profiler — activates only with ?mainprof=1. Diagnoses
  // what eats main-thread time (LoAF script attribution) and whether the audio
-@@ -383,11 +385,11 @@ function wireTransport() {
+@@ -443,11 +444,11 @@ function wireTransport() {
      setStatus("Reset");
    });
  
@@ -28,7 +27,7 @@ index e241b29..9f181b5 100644
  
    // Working save-state path (the slot Save/Load above are stubbed in
    // the discio core): DL State captures a version-matched .sav via
-@@ -865,6 +867,18 @@ function updateScreenHud(info) {
+@@ -927,6 +928,18 @@ function updateScreenHud(info) {
  // is a good guess, not a reason to override someone who has already decided,
  // but the settings and features describe what the title needs on whichever
  // path runs, so they still apply.
@@ -47,7 +46,7 @@ index e241b29..9f181b5 100644
  async function applyGameProfile(file) {
    if (!elements.autoProfile?.checked) {
      host.applyGameProfile(null);
-@@ -882,7 +896,11 @@ async function applyGameProfile(file) {
+@@ -944,7 +957,11 @@ async function applyGameProfile(file) {
    if (!profile) return;
    const notes = [];
    const rendererPinned = new URLSearchParams(window.location.search).has("video");
@@ -60,71 +59,10 @@ index e241b29..9f181b5 100644
      const backend = profile.renderer === "hardware" ? "WebGPU-Real" : "Software Renderer";
      if (host.applyVideoBackend(backend)) notes.push(`${profile.renderer} renderer`);
    }
-@@ -1294,6 +1312,130 @@ function formatImageSizes(rawSize, dataSize) {
-   return raw && data ? `${raw} / ${data}` : raw || data || "-";
+@@ -1632,6 +1649,69 @@ async function removeDiscFromDevice(key, name) {
+   refreshDiscLibrary();
  }
  
-+// ── dolphin-browser: a disc on the server (?disc=<same-origin URL>) ──────────────────
-+// The page's own way in is a dropped File. With ?disc= the file stays on the server and
-+// is read a piece at a time: the main thread needs only its size (a HEAD) and the first
-+// 32 KB (for the game id), the worker reads the rest through Range requests. A click is
-+// still needed — the AudioContext wants a gesture — so the drop zone becomes a start
-+// button. Settings that reload the page keep the parameter.
-+class RemoteDisc {
-+  constructor({ url, name, size }) {
-+    this.url = url; this.name = name; this.size = size; this.type = "application/octet-stream";
-+  }
-+  slice(start, end) {
-+    const url = this.url, stop = Math.min(end, this.size) - 1;
-+    return { arrayBuffer: async () => (await fetch(url, { headers: { Range: `bytes=${start}-${stop}` }, credentials: "same-origin" })).arrayBuffer() };
-+  }
-+}
-+let remoteDiscStats = null;
-+function wireRemoteDisc() {
-+  const param = new URLSearchParams(window.location.search).get("disc");
-+  if (!param) return;
-+  let url;
-+  try { url = new URL(param, window.location.href); } catch { setStatus("?disc= is not a URL", "error"); return; }
-+  if (url.origin !== window.location.origin) { setStatus("?disc= must be on this site", "error"); return; }
-+  const name = decodeURIComponent(url.pathname.split("/").pop() || "disc");
-+  elements.dropBadge.textContent = `Loading ${name}…`;
-+  elements.gameTitle.textContent = name;
-+  fetch(url, { method: "HEAD", credentials: "same-origin" })
-+    .then((r) => {
-+      if (!r.ok) throw new Error(`the disc answered HTTP ${r.status}`);
-+      const size = Number(r.headers.get("Content-Length"));
-+      if (!size) throw new Error("the server gave no size for the disc");
-+      if (r.headers.get("Accept-Ranges") === "none") throw new Error("the server doesn't do Range requests");
-+      const disc = new RemoteDisc({ url: url.href, name, size });
-+      elements.dropBadge.textContent = `Start ${name}`;
-+      elements.dropBadge.classList.add("start");
-+      const start = async (event) => {
-+        event.preventDefault();
-+        elements.dropZone.removeEventListener("click", start);
-+        elements.dropBadge.textContent = "Starting…";
-+        await mountFile(disc);
-+        elements.dropBadge.textContent = "";
-+        pollDiscStats();
-+      };
-+      elements.dropZone.addEventListener("click", start);
-+      setStatus(`${name} (${formatBytes(size)}) — click the screen to start`);
-+    })
-+    .catch((error) => { elements.dropBadge.textContent = "Disc unavailable"; setStatus(error.message, "error"); });
-+}
-+function pollDiscStats() {
-+  setInterval(async () => {
-+    const a = host.adapter;
-+    if (!a || typeof a.request !== "function") return;
-+    try {
-+      const r = await a.request("discStats", {});
-+      if (!r?.disc) return;
-+      remoteDiscStats = r.disc;
-+      const d = r.disc;
-+      elements.mountNote.textContent = `${(d.bytes / 1048576).toFixed(0)} MB read · waited ${d.waits}× (${(d.waitMs / 1000).toFixed(1)} s)`;
-+    } catch { /* the worker is busy or gone */ }
-+  }, 2000);
-+}
-+
 +// ── dolphin-browser: memory cards and states that survive a reload ───────────────────
 +// The worker keeps Dolphin's memory-card files in IndexedDB on its own clock; a page
 +// going away asks it for one last write. States saved to a slot are kept here, under

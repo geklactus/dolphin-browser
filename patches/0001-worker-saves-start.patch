@@ -1,11 +1,11 @@
 diff --git a/src/upstream-discio-worker.js b/src/upstream-discio-worker.js
-index 35e0692..48fef8a 100644
+index 1ce052f..c2b980c 100644
 --- a/src/upstream-discio-worker.js
 +++ b/src/upstream-discio-worker.js
-@@ -1045,6 +1045,18 @@ async function handleMessage(type, payload) {
-       return framePayload();
-     case "bootProbe":
-       return { bootProbe: bootProbePayload(metadataPayload()) };
+@@ -1064,6 +1064,16 @@ async function handleMessage(type, payload) {
+     case "discFlush":
+       remoteDisc?.flush();
+       return { disc: remoteDisc?.stats ?? null };
 +    // dolphin-browser: the adapter sends these on Start/Pause; the core runs on its own
 +    // thread and the presentation loop has its own controls, so they are acknowledged.
 +    case "start":
@@ -16,82 +16,13 @@ index 35e0692..48fef8a 100644
 +      const written = moduleInstance?.FS ? await persistSaves(moduleInstance.FS) : 0;
 +      return { written, disc: remoteDisc?.stats ?? null };
 +    }
-+    case "discStats":
-+      return { disc: remoteDisc?.stats ?? null };
      case "saveState":
        return { saved: Boolean(api?.saveState(payload.slot | 0)) };
      case "loadState": {
-@@ -2205,6 +2217,156 @@ function resolveWorkerFs(moduleInstance) {
-   return moduleInstance?.FS?.filesystems?.WORKERFS ?? moduleInstance?.WORKERFS ?? null;
+@@ -2291,6 +2301,89 @@ function remoteDiscReadError(error) {
+   return ErrnoError ? new ErrnoError(29) : error;
  }
  
-+// ── dolphin-browser: a disc on the server, read a piece at a time ────────────────────
-+// WORKERFS reads a mounted file with contents.slice(a, b) and a FileReaderSync. A
-+// RangeDisc stands in for the dropped File: its slices are served from fixed-size
-+// blocks fetched with HTTP Range requests — synchronously, which a dedicated worker may
-+// do — kept in an LRU, with the block after a miss prefetched in the background (the
-+// worker's loop runs between the core's reads). The reader is swapped for one that uses
-+// a slice's bytes as they are, so no Blob is built per read. The object the main thread
-+// posts is the plain {url, name, size} (methods don't survive structured clone); it is
-+// recognised by its url.
-+const RANGE_BLOCK = 4 * 1024 * 1024;
-+const RANGE_CACHE_BLOCKS = 64;                       // 256 MiB of disc kept in memory
-+class RangeDisc {
-+  constructor({ url, name, size }) {
-+    this.url = url; this.name = name; this.size = size; this.type = "application/octet-stream";
-+    this.blocks = new Map(); this.prefetching = new Set();
-+    this.stats = { requests: 0, bytes: 0, waits: 0, waitMs: 0 };
-+  }
-+  slice(start = 0, end = this.size) {
-+    start = Math.max(0, Math.min(start, this.size)); end = Math.max(start, Math.min(end, this.size));
-+    const out = new Uint8Array(end - start);
-+    let pos = start, off = 0;
-+    while (pos < end) {
-+      const i = Math.floor(pos / RANGE_BLOCK), b = this.block(i);
-+      const from = pos - i * RANGE_BLOCK, n = Math.min(b.length - from, end - pos);
-+      out.set(b.subarray(from, from + n), off); pos += n; off += n;
-+    }
-+    return { size: out.length, buffer: out.buffer };
-+  }
-+  block(i) {
-+    let b = this.blocks.get(i);
-+    if (b) { this.blocks.delete(i); this.blocks.set(i, b); }          // LRU: freshest last
-+    else { b = this.fetchSync(i); this.keep(i, b); }
-+    const next = i + 1;
-+    if (next * RANGE_BLOCK < this.size && !this.blocks.has(next) && !this.prefetching.has(next)) this.prefetch(next);
-+    return b;
-+  }
-+  keep(i, b) {
-+    this.blocks.set(i, b);
-+    while (this.blocks.size > RANGE_CACHE_BLOCKS) this.blocks.delete(this.blocks.keys().next().value);
-+  }
-+  range(i) { const a = i * RANGE_BLOCK; return [a, Math.min(a + RANGE_BLOCK, this.size) - 1]; }
-+  fetchSync(i) {
-+    const [a, b] = this.range(i), t0 = performance.now();
-+    const x = new XMLHttpRequest();
-+    x.open("GET", this.url, false); x.responseType = "arraybuffer";
-+    x.setRequestHeader("Range", `bytes=${a}-${b}`); x.send();
-+    if (x.status !== 206) throw new Error(x.status === 200 ? "the server ignored the Range request" : `disc read failed: HTTP ${x.status}`);
-+    const bytes = new Uint8Array(x.response);
-+    if (bytes.length !== b - a + 1) throw new Error(`short disc read (${bytes.length} of ${b - a + 1})`);
-+    this.stats.requests++; this.stats.bytes += bytes.length; this.stats.waits++; this.stats.waitMs += performance.now() - t0;
-+    return bytes;
-+  }
-+  prefetch(i) {
-+    const [a, b] = this.range(i);
-+    this.prefetching.add(i);
-+    fetch(this.url, { headers: { Range: `bytes=${a}-${b}` }, credentials: "same-origin", cache: "no-store" })
-+      .then(async (r) => {
-+        if (r.status !== 206) return;
-+        const bytes = new Uint8Array(await r.arrayBuffer());
-+        if (bytes.length === b - a + 1 && !this.blocks.has(i)) { this.keep(i, bytes); this.stats.requests++; this.stats.bytes += bytes.length; }
-+      })
-+      .catch(() => {})
-+      .finally(() => this.prefetching.delete(i));
-+  }
-+}
-+let remoteDisc = null;
-+
 +// ── dolphin-browser: memory cards and the Wii NAND survive a reload ───────────────────
 +// Dolphin's user directory is MEMFS; its GCI-folder memory cards are files under
 +// /dolphin-user/GC and a Wii game's save lives in the NAND under /dolphin-user/Wii
@@ -178,37 +109,21 @@ index 35e0692..48fef8a 100644
  function bindApi(module) {
    const cwrap = module.cwrap.bind(module);
    const ccall = module.ccall.bind(module);
-@@ -2519,8 +2681,28 @@ async function mountFile(file, gameProfile = activeGameProfile) {
-     mounted = false;
+@@ -2614,6 +2707,13 @@ async function mountFile(file, gameProfile = activeGameProfile) {
+     await remoteDisc.close();
+     remoteDisc = null;
    }
- 
-+  // dolphin-browser: a disc on the server is read through a RangeDisc, and WORKERFS's
-+  // reader takes a slice's bytes as they are (a real File still goes through the
-+  // FileReaderSync). Memory cards come back from IndexedDB before the boot.
-+  const workerFs = resolveWorkerFs(moduleInstance);
-+  let data = file;
-+  if (file.url) {
-+    remoteDisc = new RangeDisc(file);
-+    data = remoteDisc;
-+    if (!workerFs.reader?.rangeAware) {
-+      const real = workerFs.reader ?? new FileReaderSync();
-+      workerFs.reader = { rangeAware: true, readAsArrayBuffer: (chunk) => (chunk instanceof Blob ? real.readAsArrayBuffer(chunk) : chunk.buffer) };
-+    }
-+  }
++  // dolphin-browser: memory cards and the Wii NAND come back from IndexedDB before the boot.
 +  try {
 +    await restoreSaves(fs);
 +  } catch (error) {
 +    console.warn("[saves] restore failed:", error);
 +  }
 +  watchSaves(fs);
-+
-   const _t_workerfs = performance.now();
--  fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
-+  fs.mount(workerFs, { blobs: [{ name: safeName, data }] }, WORKERFS_MOUNT_DIR);
-   mounted = true;
-   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
  
-@@ -2544,7 +2726,9 @@ async function mountFile(file, gameProfile = activeGameProfile) {
+   const _t_workerfs = performance.now();
+   fs.mount(workerFs, { blobs: [{ name: safeName, data }] }, WORKERFS_MOUNT_DIR);
+@@ -2640,7 +2740,9 @@ async function mountFile(file, gameProfile = activeGameProfile) {
    lastPresentedAt = 0;
    presentedFrame = 0;
  

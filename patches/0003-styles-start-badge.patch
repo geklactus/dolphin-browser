@@ -1,5 +1,5 @@
 diff --git a/src/styles.css b/src/styles.css
-index 2d85680..a88d4e3 100644
+index c1f5595..683d5dd 100644
 --- a/src/styles.css
 +++ b/src/styles.css
 @@ -362,6 +362,16 @@ canvas {
