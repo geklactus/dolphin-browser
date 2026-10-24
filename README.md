@@ -39,34 +39,27 @@ runs without it).
 - `wasm-dolphin-repo` and `wasm-dolphin-commit` — the repository and commit the page and
   core come from. Bump the commit, open a PR, and the PR build shows whether the patches
   still apply and the core still matches its pin.
-- `patches/*.patch`, applied with `git apply` in name order:
-  - `0001-worker-remote-disc-saves-start.patch` (the disc worker):
-    - **a disc on the server, read a piece at a time.** Upstream mounts a dropped `File`
-      through Emscripten's WORKERFS, which reads it by `slice()` + `FileReaderSync`. A
-      `RangeDisc` stands in for the file: its slices come from 4 MiB blocks fetched with
-      HTTP Range requests — synchronously, which a dedicated worker may do — kept in a
-      256 MiB LRU, the next block prefetched after a miss. The reader is swapped for one
-      that uses a slice's bytes as they are. A 1.4 GB image starts in seconds.
+- `patches/*.patch`, applied with `git apply` in name order. Since 2026.10.24-1 the disc
+  on the server is upstream's own feature (`?disc=<same-origin URL>`, `src/remote-disc.js`
+  in the fork: memory, then a copy of the whole image in this device's origin-private file
+  system, then HTTP Range through a fetch worker that pulls the rest while the game runs —
+  after the first minutes nothing waits on the network and a second launch reads none of
+  it), so the patches are down to what the fork doesn't carry:
+  - `0001-worker-saves-start.patch` (the disc worker):
     - **saves that survive a reload.** Dolphin's user directory is MEMFS; the GCI-folder
       memory-card files under `/dolphin-user/GC` and the Wii NAND under `/dolphin-user/Wii`
       (a Wii game's save is `title/<id>/data/…`; `tmp/` stays out) are restored from
       IndexedDB before a disc boots and written out when they change (every 5 s, and on
-      request). Since 2026.10.23-1 for the NAND; before that a Wii save lived until the
-      tab closed.
-    - `start`/`pause`/`resume` messages the adapter sends but the worker never answered
-      (every Start showed "Unknown upstream worker message"); `flushSaves`/`discStats`.
+      request).
+    - `start`/`pause`/`resume` messages the adapter sends but the worker never answered;
+      `flushSaves`.
     - the 16 MiB boot gate lowered to 1 MiB: a homebrew disc is a disc too.
-  - `0002-page-disc-param-states-webgpu.patch` (the page):
-    - `?disc=<same-origin URL>`: the page gets the size with a HEAD and the game id from
-      the first 32 KB, the drop zone becomes a Start button (the AudioContext needs the
-      click), the worker gets the `RangeDisc`. Settings that reload the page keep it.
-      The panel shows how much was read and how often the core waited on the network.
+  - `0002-page-states-webgpu.patch` (the page):
     - the slot Save/Load buttons, stubs in the core, capture a real state (the same path
       as the download button) and keep it in IndexedDB under the game's id.
     - a per-game profile's switch to the "hardware" renderer is only applied where WebGPU
       hands out an adapter (one probe per page); `navigator.gpu` alone is no promise of
-      one. Since 2026.10.23-2 a profile also carries upstream's GameSettings lines and the
-      renderer feature bits the title needs, and those apply on either renderer.
+      one.
     - the memory cards are flushed when the page is hidden or closed.
   - `0003-styles-start-badge.patch`: the Start badge.
 
@@ -79,7 +72,11 @@ the first minute with 5–7 short waits; Animal Crossing (20 MB RVZ) runs at ful
 renders black on both paths, which is upstream's documented state for that title (its
 `game-profiles.js`, issue #11), not the remote-disc path. With the fork's core, Mario Kart
 Wii (real disc) boots to its main menu at 60 fps with the mouse as the Wii Remote pointer —
-the menu highlight follows it — and Melee still boots on the same core. With the
+the menu highlight follows it — and Melee still boots on the same core. With
+2026.10.24-1 (the fork's tiered reader) the same disc on a 100 Mbit link with 40 ms of
+latency waited 14 times in its first 90 s and never after, where the previous reader
+waited 22 times across the whole run; a second launch in the same browser read nothing
+from the network. With the
 2026.10.23-1 core (the fork's cold-code compile cap), a first launch of Mario Kart Wii with
 an empty JIT cache holds 100–102 % game speed through the menus over 120 s, where
 2026.10.22-1 swung between 2 % and 160 % (median 55–63 %).
