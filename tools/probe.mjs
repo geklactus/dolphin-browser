@@ -5,10 +5,16 @@
 //
 //   node tools/probe.mjs --base-url http://127.0.0.1:8085/ --disc mkw.rvz --out ./probe-out
 //                        [--duration 120] [--extra "fastsw=2&metrics=1"] [--profile <dir>]
-//                        [--playwright <path to playwright/index.mjs>] [--headed]
+//                        [--record [file]] [--playwright <path to playwright/index.mjs>] [--headed]
 //
 // --profile keeps the browser profile between runs (IndexedDB: the JIT cache, the saves),
 // which is how a "second session" is measured and how a prebuilt JIT cache is grown.
+// --record opens the page with ?recordreads=1 and, at the end, saves the order the core
+// read the disc's blocks in (window.__discReadOrder) to <file>, by default
+// <out>/<GAMEID>.reads.json — block numbers and times, nothing of the game. Kept beside the
+// disc as <disc file>.reads.json, it puts those blocks first in a first launch's background
+// download (the fork's src/remote-disc.js). The summary's disc90 is the disc counters at
+// 90 s: the waits of a launch's first minute and a half.
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -29,6 +35,7 @@ url.searchParams.set("disc", new URL(`disc/${disc}`, baseUrl).href);
 url.searchParams.set("metrics", "1");
 url.searchParams.set("jitwarmup", "700");
 for (const kv of (args.extra || "").split("&").filter(Boolean)) { const [k, v] = kv.split("="); url.searchParams.set(k, v ?? ""); }
+if (args.record) url.searchParams.set("recordreads", "1");
 
 const lines = [], samples = [], t0 = Date.now();
 const log = (s) => { const l = `[probe +${((Date.now() - t0) / 1000).toFixed(1)}s] ${s}`; console.log(l); lines.push(l); };
@@ -74,7 +81,8 @@ try {
                // the tiered reader's counters (remote-disc.js): bytes from the server, waits on it and for how long,
                // bytes kept on the device, whether the whole image is there, hits served from the device
                disc: { bytes: d.bytes ?? null, waits: d.waits ?? null, waitMs: d.waitMs ?? null, storedBytes: d.storedBytes ?? null,
-                       complete: d.complete ?? null, l2Hits: d.l2Hits ?? null, mode: d.mode ?? null },
+                       complete: d.complete ?? null, l2Hits: d.l2Hits ?? null, mode: d.mode ?? null,
+                       readOrder: d.readOrder ?? null, recorded: d.recorded ?? null, sequential: d.sequential ?? null },
                helper: typeof info.ppcWasmHelperStats === "string" ? info.ppcWasmHelperStats.slice(0, 8000) : null };
     });
     x.t = (Date.now() - tStart) / 1000;
@@ -93,6 +101,13 @@ try {
     await page.waitForTimeout(Math.max(0, 1000 - 120));
   }
   await shot("final");
+  if (args.record) {
+    const order = await page.evaluate(() => window.__discReadOrder?.() ?? null);
+    if (!order) throw new Error("no read order: the page has no window.__discReadOrder, or it wasn't recording");
+    const file = path.resolve(args.record !== "1" ? args.record : path.join(outDir, `${order.game || order.name}.reads.json`));
+    await writeFile(file, JSON.stringify(order));
+    log(`read order: ${order.blocks.length} blocks of ${Math.ceil(order.size / order.block)} → ${file} (beside the disc as ${order.name}.reads.json)`);
+  }
 } catch (e) {
   log(`ERROR ${e.stack || e}`);
 } finally {
@@ -100,7 +115,8 @@ try {
   const sorted = [...spd].sort((a, b) => a - b), q = (f) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(f * sorted.length))] : 0;
   const summary = { disc, extra: args.extra || "", samples: spd.length, frames: Number(samples.at(-1)?.frame) || 0,
     speed: { p10: q(0.1), median: q(0.5), p90: q(0.9), min: sorted[0] ?? 0, max: sorted.at(-1) ?? 0, under80: spd.filter((v) => v < 80).length },
-    jitCompiled: samples.at(-1)?.jitCompiled ?? null, mountNote: samples.at(-1)?.mountNote ?? "", disc: samples.at(-1)?.disc ?? null };
+    jitCompiled: samples.at(-1)?.jitCompiled ?? null, mountNote: samples.at(-1)?.mountNote ?? "", disc: samples.at(-1)?.disc ?? null,
+    disc90: samples.filter((x) => x.t <= 90.5).at(-1)?.disc ?? null };
   log(`SUMMARY ${JSON.stringify(summary)}`);
   await writeFile(path.join(outDir, "samples.json"), JSON.stringify(samples, null, 1));
   await writeFile(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 2));
