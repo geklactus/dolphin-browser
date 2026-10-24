@@ -1,6 +1,10 @@
 // A test server for the package: the package directory at /, with the COOP/COEP headers
 // the core needs, and discs under /disc/ with Range support — plus an added first-byte
-// delay and a bandwidth cap on the discs, to stand in for a slower link.
+// delay and a bandwidth cap on the discs, to stand in for a slower link. The cap is one
+// link that every disc response in flight shares (a 100 Mbit link with three requests on
+// it is still 100 Mbit — it used to be per response, which let background requests run
+// beside a miss at no cost to it), and a response the browser aborts stops taking from it.
+// A disc's read order (<disc file>.reads.json) is served from beside it like any file.
 //
 //   node tools/serve.mjs --pkg <package dir> --disc <disc dir> [--port 8085] [--delay-ms 0]
 //                        [--bw-mbit 0] [--log <file>]
@@ -20,6 +24,15 @@ const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/jav
   ".json": "application/json", ".css": "text/css", ".png": "image/png", ".svg": "image/svg+xml", ".map": "application/json" };
 const log = args.log ? fs.createWriteStream(args.log, { flags: "a" }) : null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The link: one queue every disc byte goes through, at BW bytes/s.
+let linkFree = 0;
+async function link(n) {
+  if (!BW) return;
+  const now = Date.now();
+  linkFree = Math.max(linkFree, now) + n / BW * 1000;
+  if (linkFree > now) await sleep(linkFree - now);
+}
 
 http.createServer(async (req, res) => {
   const p = decodeURIComponent(new URL(req.url, "http://x").pathname);
@@ -44,19 +57,25 @@ http.createServer(async (req, res) => {
   const n = b - a + 1, t0 = Date.now();
   if (m) { res.setHeader("Content-Range", `bytes ${a}-${b}/${st.size}`); res.setHeader("Content-Length", n); res.writeHead(206); }
   else { res.setHeader("Content-Length", n); res.writeHead(200); }
+  let gone = false, sent = 0;
+  res.on("close", () => { gone = true; });
   if (isDisc && DELAY) await sleep(DELAY);
   const fd = fs.openSync(file, "r");
   try {
     const CH = 65536, buf = Buffer.alloc(CH);
     let pos = a;
-    while (pos <= b) {
+    while (pos <= b && !gone) {
       const len = Math.min(CH, b - pos + 1);
       fs.readSync(fd, buf, 0, len, pos); pos += len;
-      if (!res.write(Buffer.from(buf.subarray(0, len)))) await new Promise((r) => res.once("drain", r));
-      if (isDisc && BW) { const want = (pos - a) / BW * 1000, have = Date.now() - t0 - DELAY; if (want > have) await sleep(want - have); }
+      if (isDisc) await link(len);
+      if (gone) break;
+      if (!res.write(Buffer.from(buf.subarray(0, len)))) {
+        await new Promise((r) => { const done = () => { res.off("drain", done); res.off("close", done); r(); }; res.on("drain", done); res.on("close", done); });
+      }
+      sent += len;
     }
   } finally { fs.closeSync(fd); res.end(); }
-  if (isDisc && log) log.write(`${new Date().toISOString()} ${a}-${b} ${n} ${Date.now() - t0}ms\n`);
+  if (isDisc && log) log.write(`${new Date().toISOString()} ${a}-${b} ${n} sent=${sent}${gone ? " aborted" : ""} ${Date.now() - t0}ms\n`);
 }).listen(port, "127.0.0.1", () => {
-  console.log(`serving ${ROOT} on http://127.0.0.1:${port}/ — discs from ${DISC}; delay ${DELAY} ms, bandwidth ${BW ? `${args["bw-mbit"]} Mbit/s` : "unlimited"}`);
+  console.log(`serving ${ROOT} on http://127.0.0.1:${port}/ — discs from ${DISC}; delay ${DELAY} ms, bandwidth ${BW ? `${args["bw-mbit"]} Mbit/s (shared)` : "unlimited"}`);
 });
